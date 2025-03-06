@@ -1,3 +1,4 @@
+      
 import inspect
 import json
 from typing import TYPE_CHECKING, Any, Callable, Dict, Sequence, Type
@@ -5,11 +6,10 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Sequence, Type
 import httpx
 import openai
 from bisheng.cache.utils import file_download
-from bisheng.database.models.knowledge import KnowledgeDao
+from bisheng.chat.config import ChatConfig
 from bisheng.interface.agents.base import agent_creator
 from bisheng.interface.chains.base import chain_creator
 from bisheng.interface.custom_lists import CUSTOM_NODES
-from bisheng.interface.embeddings.custom import FakeEmbedding
 from bisheng.interface.importing.utils import (eval_custom_component_code, get_function,
                                                import_by_type)
 from bisheng.interface.initialize.llm import initialize_vertexai
@@ -24,12 +24,12 @@ from bisheng.interface.wrappers.base import wrapper_creator
 from bisheng.settings import settings
 from bisheng.utils import validate
 from bisheng.utils.constants import NODE_ID_DICT, PRESET_QUESTION
-from bisheng.utils.embedding import decide_embeddings
 from bisheng_langchain.vectorstores import VectorStoreFilterRetriever
 from langchain.agents import agent as agent_module
 from langchain.agents.agent import AgentExecutor
 from langchain.agents.agent_toolkits.base import BaseToolkit
 from langchain.agents.tools import BaseTool
+from langchain.base_language import BaseLanguageModel
 from langchain.chains.base import Chain
 from langchain.document_loaders.base import BaseLoader
 from langchain.vectorstores.base import VectorStore
@@ -115,7 +115,7 @@ async def instantiate_based_on_type(class_object,
     elif base_type == 'embeddings':
         return instantiate_embedding(class_object, params)
     elif base_type == 'vectorstores':
-        return instantiate_vectorstore(node_type, class_object, params)
+        return instantiate_vectorstore(class_object, params)
     elif base_type == 'documentloaders':
         return instantiate_documentloader(class_object, params)
     elif base_type == 'textsplitters':
@@ -202,19 +202,19 @@ def instantiate_input_output(node_type, class_object, params, id_dict):
             params['variables'].append({'node_id': id, 'input': variable[index]})
         return class_object(**params)
     if node_type == 'InputFileNode':
+        logger.info(params)
+        hash_key = params.get("hash_key", "")
+        logger.info(hash_key)
+        file_name = params.get("value", "")
+        if file_name == "":
+            file_name = params.get("file_path", "").split('&name=')[-1]
+        logger.info(file_name)
         file_path = class_object(**params).text()
         if file_path:
-            file_path, file_name2 = file_download(file_path[0])
-            return [file_path, file_name2 if file_name2 else file_path[1]]
+            file_path, file_name2, is_skip = file_download(file_path[0], hash_key, file_name)
+            return [file_path, file_name2 if file_name2 else file_path[1], is_skip]
         else:
             return ''
-    if 'file_path' in params:
-        file_path = params['file_path']
-        if not file_path:
-            return ''
-        if isinstance(file_path, list):
-            params['file_path'] = file_path[0]
-
     return class_object(**params).text()
 
 
@@ -248,14 +248,13 @@ def instantiate_output_parser(node_type, class_object, params):
     return class_object(**params)
 
 
-def instantiate_llm(node_type, class_object, params: Dict, user_llm_request: bool = True):
+def instantiate_llm(node_type, class_object, params: Dict):
     # This is a workaround so JinaChat works until streaming is implemented
     # if "openai_api_base" in params and "jina" in params["openai_api_base"]:
     # False if condition is True
     if is_openai_v1() and params.get('openai_proxy'):
         params['http_client'] = httpx.Client(proxies=params.get('openai_proxy'))
         params['http_async_client'] = httpx.AsyncClient(proxies=params.get('openai_proxy'))
-        del params['openai_proxy']
 
     if node_type == '':
         anthropic_api_key = params.pop('anthropic_api_key', None)
@@ -269,13 +268,21 @@ def instantiate_llm(node_type, class_object, params: Dict, user_llm_request: boo
             params['max_tokens'] = int(params['max_tokens'])
         elif not isinstance(params.get('max_tokens'), int):
             params.pop('max_tokens', None)
-
+    # 支持stream
     llm = class_object(**params)
     llm_config = settings.get_from_db('llm_request')
+    if isinstance(llm, BaseLanguageModel):
+        if hasattr(llm, 'streaming') and isinstance(llm.streaming, bool):
+            llm.streaming = llm_config.get(
+                'stream') if 'stream' in llm_config else ChatConfig.streaming
+        elif hasattr(llm, 'stream') and isinstance(llm.stream, bool):
+            llm.stream = llm_config.get(
+                'stream') if 'stream' in llm_config else ChatConfig.streaming
+
     # 支持request_timeout & max_retries
     if hasattr(llm, 'request_timeout') and 'request_timeout' in llm_config:
         if isinstance(llm_config.get('request_timeout'), str):
-            llm.request_timeout = int(llm_config.get('request_timeout'))
+            llm.request_timeout = eval(llm_config.get('request_timeout'))
         else:
             llm.request_timeout = llm_config.get('request_timeout')
     if hasattr(llm, 'max_retries') and 'max_retries' in llm_config:
@@ -328,7 +335,6 @@ def instantiate_chains(node_type, class_object: Type[Chain], params: Dict, id_di
             if settings.get_from_db('file_access'):
                 # need to verify file access
                 access_url = settings.get_from_db('file_access') + f'?username={user_name}'
-                logger.info('file_access_filter url={}', access_url)
                 vectorstore = VectorStoreFilterRetriever(vectorstore=params['retriever'],
                                                          access_url=access_url)
             else:
@@ -347,7 +353,7 @@ def instantiate_chains(node_type, class_object: Type[Chain], params: Dict, id_di
         params['chains'] = [chains_origin[chains_dict.get(id)] for id in chain_order]
     # dict 转换
     if 'headers' in params and isinstance(params['headers'], str):
-        params['headers'] = json.loads(params['headers'])
+        params['headers'] = eval(params['headers'])
     if node_type == 'ConversationalRetrievalChain':
         params['get_chat_history'] = str
         params['combine_docs_chain_kwargs'] = {
@@ -461,9 +467,6 @@ def instantiate_embedding(class_object, params: Dict):
         if params.get('openai_proxy'):
             params['http_client'] = httpx.Client(proxies=params.get('openai_proxy'))
             params['http_async_client'] = httpx.AsyncClient(proxies=params.get('openai_proxy'))
-            del params['openai_proxy']
-        if class_object.__name__ == 'OpenAIEmbeddings':
-            params['check_embedding_ctx_length'] = False
 
         return class_object(**params)
     except ValidationError:
@@ -471,48 +474,12 @@ def instantiate_embedding(class_object, params: Dict):
         return class_object(**params)
 
 
-def instantiate_vectorstore(node_type: str, class_object: Type[VectorStore], params: Dict):
+def instantiate_vectorstore(class_object: Type[VectorStore], params: Dict):
     user_name = params.pop('user_name', '')
     search_kwargs = params.pop('search_kwargs', {})
     search_type = params.pop('search_type', 'similarity')
     if 'documents' not in params:
         params['documents'] = []
-
-    # 过滤掉用户没有权限的知识库
-    # TODO zgq 后续统一技能执行流程后将和业务有关的逻辑都迁移到初始化技能对象之前
-    if node_type == 'MilvusWithPermissionCheck' or node_type == 'ElasticsearchWithPermissionCheck':
-        col_name = 'collection_name'
-        if node_type == 'ElasticsearchWithPermissionCheck':
-            col_name = 'index_name'
-
-        # 获取执行用户 有权限查看的知识库列表
-        knowledge_ids = [one['key'] for one in params[col_name]]
-        if params.pop('_is_check_auth', True):
-            knowledge_list = KnowledgeDao.judge_knowledge_permission(user_name, knowledge_ids)
-        else:
-            knowledge_list = KnowledgeDao.get_list_by_ids(knowledge_ids)
-        logger.debug(f'{node_type} after filter, get knowledge_list: {knowledge_list}')
-
-        if not knowledge_list:
-            logger.warning(f'{node_type}: after filter, get zero knowledge')
-
-        # 没有任何知识库的话，提供假的embedding和空的collection_name
-        if node_type == 'MilvusWithPermissionCheck':
-            params[col_name] = []
-            params['collection_embeddings'] = []
-            params['partition_keys'] = []
-            for knowledge in knowledge_list:
-                params[col_name].append(knowledge.collection_name)
-                params['collection_embeddings'].append(decide_embeddings(knowledge.model))
-                if knowledge.collection_name.startswith('partition'):
-                    params['partition_keys'].append(knowledge.id)
-                else:
-                    params['partition_keys'].append(None)
-            params['embedding'] = params['collection_embeddings'][0] if params['collection_embeddings'] else FakeEmbedding()
-        else:
-            params[col_name] = [
-                knowledge.index_name or knowledge.collection_name for knowledge in knowledge_list
-            ]
 
     if initializer := vecstore_initializer.get(class_object.__name__):
         vecstore = initializer(class_object, params, search_kwargs)
@@ -547,11 +514,13 @@ def instantiate_documentloader(class_object: Type[BaseLoader], params: Dict):
         extensions = file_filter.split(',')
         params['file_filter'] = lambda x: any(extension.strip() in x for extension in extensions)
     if 'file_path' in params:
+        logger.info(params)
         file_path = params['file_path']
         if isinstance(file_path, list):
             file_name = file_path[1]
             params['file_path'] = file_path[0]
             if class_object.__name__ == 'ElemUnstructuredLoaderV0':
+                params['is_skip'] = file_path[2]
                 params['file_name'] = file_name
     metadata = params.pop('metadata', None)
     if metadata and isinstance(metadata, str):
@@ -563,6 +532,8 @@ def instantiate_documentloader(class_object: Type[BaseLoader], params: Dict):
     if 'file_path' in params and not params['file_path']:
         return []
 
+    logger.info("!!!!!!!!!!!!!!")
+    logger.info(params)
     docs = class_object(**params).load()
     # Now if metadata is an empty dict, we will not add it to the documents
     if metadata:
@@ -577,8 +548,8 @@ def instantiate_documentloader(class_object: Type[BaseLoader], params: Dict):
 
 
 def instantiate_textsplitter(
-    class_object,
-    params: Dict,
+        class_object,
+        params: Dict,
 ):
     try:
         documents = params.pop('documents')
@@ -589,7 +560,7 @@ def instantiate_textsplitter(
                          'Try changing the chunk_size of the Text Splitter.') from exc
 
     if ('separator_type' in params
-            and params['separator_type'] == 'Text') or 'separator_type' not in params:
+        and params['separator_type'] == 'Text') or 'separator_type' not in params:
         params.pop('separator_type', None)
         # separators might come in as an escaped string like \\n
         # so we need to convert it to a string
@@ -620,7 +591,7 @@ def replace_zero_shot_prompt_with_prompt_template(nodes):
             # Build Prompt Template
             tools = [
                 tool for tool in nodes if tool['type'] != 'chatOutputNode'
-                and 'Tool' in tool['data']['node']['base_classes']
+                                          and 'Tool' in tool['data']['node']['base_classes']
             ]
             node['data'] = build_prompt_template(prompt=node['data'], tools=tools)
             break
@@ -723,3 +694,5 @@ def build_prompt_template(prompt, tools):
     }
 
     return prompt
+
+    

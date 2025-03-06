@@ -5,29 +5,9 @@ from bisheng.template.frontend_node.base import FrontendNode
 from bisheng.template.template.base import Template
 
 
-def build_file_field(suffixes: list,
-                     fileTypes: list,
-                     name: str = 'file_path',
-                     fieldType='fileNode') -> TemplateField:
-    """Build a template field for a document loader."""
-    return TemplateField(
-        field_type=fieldType,
-        required=True,
-        show=True,
-        name=name,
-        value='',
-        suffixes=suffixes,
-        fileTypes=fileTypes,
-    )
-
-
 class InputOutputNode(FrontendNode):
     name: str = 'InputOutputNode'
     base_classes: list[str] = ['input', 'output']
-
-    def add_extra_base_classes(self) -> None:
-        if self.name in {'AudioInputNode', 'FileInputNode'}:
-            self.base_classes.append('input')
 
     def add_extra_fields(self) -> None:
         pass
@@ -56,25 +36,6 @@ class InputOutputNode(FrontendNode):
                 field.show = True
                 field.field_type = 'variable'
                 field.required = True
-        if name == 'AudioInputNode':
-            if field.name == 'file_path':
-                field.show = True
-                field.field_type = 'fileNode'
-                field.required = True
-                field.suffixes = ['.mp3']
-                field.fileTypes = ['mp3']
-            elif field.name == 'openai_proxy':
-                field.show = True
-
-        if name == 'FileInputNode':
-            if field.name == 'file_path':
-                field.show = True
-                field.field_type = 'fileNode'
-                field.required = True
-                field.suffixes = ['.jpg', '.png', '.jpeg']
-                field.fileTypes = ['jpg', 'png', 'jpeg']
-            elif field.name == 'openai_proxy':
-                field.show = True
 
 
 class InputNode(FrontendNode):
@@ -111,12 +72,20 @@ class InputFileNode(FrontendNode):
                 name='file_path',
                 value='',
             ),
-            TemplateField(field_type='str',
-                          show=True,
-                          name='file_type',
-                          placeholder='提示上传文件类型',
-                          display_name='Name',
-                          info='Tips for which file should upload'),
+            TemplateField(
+                field_type='str',
+                show=False,
+                name='hash_key',
+                value='',
+            ),
+            TemplateField(
+                field_type='str',
+                show=True,
+                name='file_type',
+                placeholder='提示上传文件类型',
+                display_name='Name',
+                info='Tips for which file should upload'
+            ),
         ],
     )
     description: str = """输入节点，用来自动对接输入"""
@@ -152,3 +121,5 @@ class OutputNode(FrontendNode):
 
     def to_dict(self):
         return super().to_dict()
+
+    

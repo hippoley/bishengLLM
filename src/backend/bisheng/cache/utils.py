@@ -1,3 +1,4 @@
+      
 import base64
 import contextlib
 import functools
@@ -10,7 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, BinaryIO
 from urllib.parse import unquote, urlparse
-
+from loguru import logger
 import cchardet
 import requests
 from appdirs import user_cache_dir
@@ -200,7 +201,7 @@ def save_uploaded_file(file, folder_name, file_name, bucket_name: str = tmp_buck
         folder_path.mkdir()
 
     # Create a hash of the file content
-    sha256_hash = hashlib.sha256()
+    sha256_hash = hashlib.md5()
     # Reset the file cursor to the beginning of the file
     file.seek(0)
     # Iterate over the uploaded file in small chunks to conserve memory
@@ -256,7 +257,7 @@ def save_download_file(file_byte, folder_name, filename):
         folder_path.mkdir()
 
     # Create a hash of the file content
-    sha256_hash = hashlib.sha256()
+    sha256_hash = hashlib.md5()
     # Reset the file cursor to the beginning of the file
 
     sha256_hash.update(file_byte)
@@ -270,31 +271,64 @@ def save_download_file(file_byte, folder_name, filename):
     return str(file_path)
 
 
-def file_download(file_path: str):
-    """download file and return path"""
-    if not os.path.isfile(file_path) and _is_valid_url(file_path):
-        r = requests.get(file_path, verify=False)
+#def file_download(file_path: str):
+#    """download file and return path"""
+#    if not os.path.isfile(file_path) and _is_valid_url(file_path):
+#        r = requests.get(file_path, verify=False)
+#
+#        if r.status_code != 200:
+#            raise ValueError('Check the url of your file; returned status code %s' % r.status_code)
+#        # 检查Content-Disposition头来找出文件名
+#        content_disposition = r.headers.get('Content-Disposition')
+#        filename = ''
+#        if content_disposition:
+#            filename = unquote(content_disposition).split('filename=')[-1].strip("\"'")
+#        if not filename:
+#            filename = unquote(urlparse(file_path).path.split('/')[-1])
+#        file_path = save_download_file(r.content, 'bisheng', filename)
+#        return file_path, filename
+#    elif not os.path.isfile(file_path):
+#        raise ValueError('File path %s is not a valid file or url' % file_path)
+#    file_name = os.path.basename(file_path)
+#    # 处理下是否包含了md5的逻辑
+#    file_name = file_name.split('_', 1)[-1] if '_' in file_name else file_name
+#    return file_path, file_name
 
-        if r.status_code != 200:
-            raise ValueError('Check the url of your file; returned status code %s' % r.status_code)
-        # 检查Content-Disposition头来找出文件名
-        content_disposition = r.headers.get('Content-Disposition')
-        filename = ''
-        if content_disposition:
-            filename = unquote(content_disposition).split('filename=')[-1].strip("\"'")
-        if not filename:
-            filename = unquote(urlparse(file_path).path.split('/')[-1])
-        file_path = save_download_file(r.content, 'bisheng', filename)
-        return file_path, filename
-    elif not os.path.isfile(file_path):
-        raise ValueError('File path %s is not a valid file or url' % file_path)
-    file_name = os.path.basename(file_path)
-    # 处理下是否包含了md5的逻辑
-    file_name = file_name.split('_', 1)[-1] if '_' in file_name else file_name
-    return file_path, file_name
+def file_download(file_path: str, hash_key: str, file_name: str):
+    cache_path = Path(CACHE_DIR)
+    folder_path = cache_path / 'bisheng'
+    logger.info(folder_path)
+    file_type = file_name.split('.')[-1]
+    file_hash_name = f'{hash_key}.{file_type}'
+    logger.info(file_hash_name)
+    if any(os.path.isfile(os.path.join(folder_path, f)) and f == file_hash_name
+           for f in os.listdir(folder_path)):
+        logger.info("文件已存在，跳过下载")
+        return str(folder_path / file_hash_name), file_name, True
+    else:
+        """download file and return path"""
+        if not os.path.isfile(file_path) and _is_valid_url(file_path):
+            r = requests.get(file_path, verify=False)
+
+            if r.status_code != 200:
+                raise ValueError('Check the url of your file; returned status code %s' % r.status_code)
+            # 检查Content-Disposition头来找出文件名
+            content_disposition = r.headers.get('Content-Disposition')
+            filename = ''
+            if content_disposition:
+                filename = unquote(content_disposition).split('filename=')[-1].strip("\"'")
+            if not filename:
+                filename = unquote(urlparse(file_path).path.split('/')[-1])
+            file_path = save_download_file(r.content, 'bisheng', filename)
+            return file_path, filename, False
+        elif not os.path.isfile(file_path):
+            raise ValueError('File path %s is not a valid file or url' % file_path)
+        return file_path, file_path.split('_', 1)[1] if '_' in file_path else '', False
 
 
 def _is_valid_url(url: str):
     """Check if the url is valid."""
     parsed = urlparse(url)
     return bool(parsed.netloc) and bool(parsed.scheme)
+
+    
